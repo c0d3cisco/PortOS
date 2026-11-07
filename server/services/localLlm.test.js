@@ -1600,6 +1600,12 @@ describe('syncOllamaProviderModels', () => {
     expect(mocks.ollama.getInstalledModels).not.toHaveBeenCalled();
   });
 
+  it('never makes a list read wait on a managed daemon that lives on another host', async () => {
+    mocks.ollama.getBaseUrl.mockReturnValueOnce('http://192.0.2.10:11434');
+    await svc.syncOllamaProviderModels({ providers: [{ ...local, endpoint: 'http://192.0.2.10:11434/v1' }] });
+    expect(mocks.ollama.getInstalledModels).not.toHaveBeenCalled();
+  });
+
   it('leaves catalogs alone when the daemon list is unreadable', async () => {
     mocks.ollama.getInstalledModels.mockResolvedValueOnce([]);
     mocks.ollama.getLastInstalledModelsError.mockReturnValueOnce('Ollama is unavailable');

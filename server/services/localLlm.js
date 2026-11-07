@@ -1078,6 +1078,18 @@ export function bindLocalLlmIo(io) {
   providersIo = io
 }
 
+const ollamaSyncFlight = createSingleFlight()
+let lastSyncedOllamaModels = null
+
+const daemonKey = (url) => {
+  try {
+    const { hostname, port } = new URL(url)
+    return `${isLocalInstanceHost(hostname) ? 'localhost' : hostname}:${port}`
+  } catch {
+    return null
+  }
+}
+
 /**
  * Bring every provider backed by the LOCAL Ollama daemon up to date with what
  * the daemon has installed, so a model added or removed — through the Local
@@ -1086,7 +1098,9 @@ export function bindLocalLlmIo(io) {
  *
  * Callers: install/delete (`force`) and every provider list read, which awaits
  * this before answering so the first picker opened after an `ollama pull`
- * already lists the model. The read path costs one loopback `/api/tags`; the
+ * already lists the model. The read path costs one loopback `/api/tags` (it
+ * is skipped when PortOS manages a daemon on another host, whose probe timeout
+ * would stall the list); the
  * catalog refresh (`refreshProviderModelsBatch`: one probe per daemon and
  * probe shape, one `providers.json` write) runs only when the installed set
  * changed — on a process's first look, when it differs from the stored
@@ -1102,22 +1116,11 @@ export function bindLocalLlmIo(io) {
  *   `providers`: the list the caller already read, to skip a second read.
  * @returns {Promise<boolean>}
  */
-const ollamaSyncFlight = createSingleFlight()
-let lastSyncedOllamaModels = null
-
-const daemonKey = (url) => {
-  try {
-    const { hostname, port } = new URL(url)
-    return `${isLocalInstanceHost(hostname) ? 'localhost' : hostname}:${port}`
-  } catch {
-    return null
-  }
-}
-
 export function syncOllamaProviderModels({ force = false, providers } = {}) {
   return ollamaSyncFlight.run(force ? 'force' : 'read', async () => {
     try {
       const localDaemon = daemonKey(ollamaManager.getBaseUrl())
+      if (!force && !localDaemon?.startsWith('localhost:')) return false
       const all = providers ?? (await getAllProviders()).providers
       const targets = (all || []).filter((p) => isOllamaBackedProvider(p)
         && daemonKey(p.envVars?.ANTHROPIC_BASE_URL || p.endpoint || 'http://localhost:11434') === localDaemon)
