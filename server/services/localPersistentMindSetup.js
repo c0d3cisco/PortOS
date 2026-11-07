@@ -174,15 +174,22 @@ export async function describeLocalPersistentMindSetup(deps = {}) {
 
   const config = await getConfig().catch(() => null);
   const profile = normalizePersistentMindProfile(config?.persistentMindProfile);
-  const mindReady = profile.enabled === true
+  const mindPinned = profile.enabled === true
     && profile.providerId === LOCAL_PERSISTENT_MIND_PROVIDER_ID
     && matchesLocalPersistentMindModel(profile.model);
+  // A pin to weights that are not pulled fails every mind wake with
+  // model-not-found, so it is not "ready" until the model step is.
+  const mindReady = mindPinned && Boolean(matchedModel);
+  let mindDetail = 'Optionally pin Persistent Mind to the Ollama provider and recommended model.';
+  if (mindReady) {
+    mindDetail = `Persistent Mind profile pins \`${profile.providerId}\` / \`${profile.model}\`.`;
+  } else if (mindPinned) {
+    mindDetail = `Persistent Mind profile pins \`${profile.providerId}\` / \`${profile.model}\`, but that model is not pulled — mind wakes fail until it is.`;
+  }
   steps.push(step(
     'mind-profile',
     mindReady ? 'ready' : 'todo',
-    mindReady
-      ? `Persistent Mind profile pins \`${profile.providerId}\` / \`${profile.model}\`.`
-      : 'Optionally pin Persistent Mind to the Ollama provider and recommended model.',
+    mindDetail,
     { kind: 'set-mind-profile', label: 'Set Persistent Mind profile', optional: true },
   ));
 
@@ -204,7 +211,10 @@ export async function describeLocalPersistentMindSetup(deps = {}) {
 
 /**
  * Enable the Ollama provider (and pin its default model when known). Optionally
- * write the Persistent Mind profile. Does not install Ollama or pull weights.
+ * write the Persistent Mind profile. Does not install Ollama or pull weights, so
+ * without an explicit `modelId` it pins only an installed match: pinning the
+ * recommended tag before the pull points every default-model Ollama call and
+ * every mind wake at weights that do not exist.
  *
  * @param {{ setMindProfile?: boolean, modelId?: string }} [options]
  */
@@ -221,21 +231,29 @@ export async function applyLocalPersistentMindSetup(options = {}) {
 
   const modelId = (typeof options.modelId === 'string' && options.modelId.trim())
     || status.matchedModel
-    || LOCAL_PERSISTENT_MIND_MODEL;
+    || null;
+
+  if (setMindProfile && !modelId) {
+    return {
+      success: false,
+      error: `Pull \`${LOCAL_PERSISTENT_MIND_MODEL}\` before pinning the Persistent Mind profile.`,
+      status,
+    };
+  }
 
   const provider = await getProviderById(LOCAL_PERSISTENT_MIND_PROVIDER_ID).catch(() => null);
   if (!provider) {
     return { success: false, error: 'Built-in ollama provider is missing.', status };
   }
 
-  const models = Array.isArray(provider.models) ? [...provider.models] : [];
-  if (!models.includes(modelId)) models.unshift(modelId);
-
-  await updateProvider(LOCAL_PERSISTENT_MIND_PROVIDER_ID, {
-    enabled: true,
-    defaultModel: modelId,
-    models,
-  });
+  const providerUpdate = { enabled: true };
+  if (modelId) {
+    const models = Array.isArray(provider.models) ? [...provider.models] : [];
+    if (!models.includes(modelId)) models.unshift(modelId);
+    providerUpdate.defaultModel = modelId;
+    providerUpdate.models = models;
+  }
+  await updateProvider(LOCAL_PERSISTENT_MIND_PROVIDER_ID, providerUpdate);
 
   let profile = null;
   if (setMindProfile) {

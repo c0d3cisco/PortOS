@@ -104,6 +104,18 @@ describe('describeLocalPersistentMindSetup', () => {
     expect(status.steps.find((s) => s.id === 'model-present').status).toBe('ready');
     expect(status.steps.find((s) => s.id === 'provider-enabled').status).toBe('ready');
   });
+
+  it('does not report a mind profile pinned to an unpulled model as ready', async () => {
+    listModels.mockResolvedValue([]);
+    getConfig.mockResolvedValue({
+      persistentMindProfile: { enabled: true, providerId: 'ollama', model: 'qwen2.5:7b-instruct' },
+    });
+    const status = await describeLocalPersistentMindSetup();
+    const mindStep = status.steps.find((s) => s.id === 'mind-profile');
+    expect(mindStep.status).toBe('todo');
+    expect(mindStep.detail).toMatch(/not pulled/);
+    expect(status.mindProfileReady).toBe(false);
+  });
 });
 
 describe('applyLocalPersistentMindSetup', () => {
@@ -123,6 +135,29 @@ describe('applyLocalPersistentMindSetup', () => {
       }),
     });
     expect(result.profile.providerId).toBe('ollama');
+  });
+
+  it('refuses to pin the mind profile before the recommended model is pulled', async () => {
+    listModels.mockResolvedValue([]);
+    const result = await applyLocalPersistentMindSetup({ setMindProfile: true });
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/Pull `qwen2\.5:7b-instruct`/);
+    expect(updateProvider).not.toHaveBeenCalled();
+    expect(updateConfig).not.toHaveBeenCalled();
+  });
+
+  it('enables the provider without repointing its default model when nothing is pulled', async () => {
+    listModels.mockResolvedValue([]);
+    getProviderById.mockResolvedValue({
+      id: 'ollama',
+      enabled: false,
+      defaultModel: 'llama3.2:3b',
+      models: ['llama3.2:3b'],
+    });
+    const result = await applyLocalPersistentMindSetup({ setMindProfile: false });
+    expect(result.success).toBe(true);
+    expect(updateProvider).toHaveBeenCalledWith('ollama', { enabled: true });
+    expect(updateConfig).not.toHaveBeenCalled();
   });
 
   it('refuses apply on hosts outside the free local-mind path', async () => {
