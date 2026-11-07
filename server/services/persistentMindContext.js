@@ -216,6 +216,8 @@ export async function preparePersistentMindContext({
   summarize = null,
   extractJournal = null,
   forceSummary = false,
+  // The wake's own purpose; absent keeps the recency-first context exactly.
+  allocationQuery = null,
 } = {}) {
   const [history, initialRollups, initialJournal] = await Promise.all([
     readPersistentMindHistory(mindId),
@@ -347,6 +349,7 @@ export async function preparePersistentMindContext({
     recentEventLimit,
     promptVersion,
     coverageGap,
+    allocationQuery,
   });
 }
 

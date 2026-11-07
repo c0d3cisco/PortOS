@@ -64,3 +64,16 @@ Accepted adjustments persist via `updateProvider({ numCtx })` and call `ollamaMa
 - CoS → Mind → Context: **Operating playbook** mode selector
 - Config: `PUT /api/cos/config` with `persistentMindCapabilities.adjustLocalContext` and/or `persistentMindPlaybook`
 - CoS → Mind → Environment details (`GET /api/cos/mind/visibility`, also the wake prompt's environment snapshot): workspace diagnostics cover only the apps in the mind's managed-app access list (`persistentMindCapabilities.allowedAppIds`), or every active app when no allowlist is stored. The snapshot fits a fixed character budget in app order, so listing every app hid a granted app further down the registry and let an ungranted app's checkout mark the whole snapshot `blocked`.
+
+## Wake-relevant context allocation
+
+Each wake's recalled context keeps its fixed budget (32K chars by default) and stable section order (identity → instructions → memories → journal → older rollups → recent events). `server/lib/persistentMindContextAllocator.js` decides **which whole items** fill it, from the wake's own purpose: the self-wake reason, the user's message, and the playbook phase.
+
+- **Score** = 0.6 × BM25 relevance (normalized to the best match) + 0.3 × recency rank within the section + 0.1 × importance (a memory's own `importance`; 0.5 for events and rollups). Deterministic, no model or embedding call.
+- `core-identity` and `important` memories are always included; the rest compete by score.
+- The newest **10** recent events always stay, and their room is reserved before older rollups take their share (still capped at 45% of the post-prefix budget).
+- Whole items are kept or dropped; nothing is shortened or rewritten. Chosen items render in their usual order (memory rank, event sequence), not score order, so a relevance shift does not reorder the prompt prefix.
+- A wake with no searchable terms, or whose terms match nothing, renders the recency-first context byte for byte.
+- The allocator only selects for this turn. It never edits, archives, re-ranks or deletes a memory or rollup.
+
+`assemblePersistentMindContext` returns an `allocation` report — mode, query length (never its text), kept/truncated/dropped counts per section, dropped memory ids, dropped event sequence ranges, and the protected count. It is recorded on the turn's `mind.model.request` event as `contextAllocation`, and `GET /api/cos/mind/context` returns it as `preview.allocation` for the wake that would run next. Every number above is a named constant in `PERSISTENT_MIND_CONTEXT_ALLOCATION`.

@@ -319,6 +319,25 @@ describe('persistent mind supervisor', () => {
     expect(mock.prepareContext).toHaveBeenCalledWith(expect.objectContaining({ maxChars: 12_000 }));
   });
 
+  // Catches the wake's purpose not reaching the allocator, and the allocation
+  // report not landing on the turn's request event.
+  it('allocates context from the wake message and playbook phase and records the allocation', async () => {
+    const allocation = { mode: 'relevance', queryChars: 30, protectedMemoryCount: 1, droppedMemoryIds: ['memory-9'], droppedEventRanges: [] };
+    mock.prepareContext.mockResolvedValueOnce({ text: 'bounded context', chars: 15, summaryState: 'not-needed', allocation });
+    const run = vi.fn(async () => ({}));
+    const prepare = vi.fn(async () => ({ ok: true, provider: { id: 'example-cloud' }, model: 'example-model', playbookPhase: { phase: 'construct', reason: 'example' } }));
+    await supervisor.registerPersistentMindTurnAdapter({ prepare, run });
+    await supervisor.startPersistentMind();
+    await supervisor.enqueuePersistentMindMessage({ id: 'message-allocation', text: 'Review the lighthouse plan.' });
+    await supervisor.drainPersistentMind();
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(1));
+    expect(mock.prepareContext).toHaveBeenCalledWith(expect.objectContaining({
+      allocationQuery: 'Review the lighthouse plan.\nconstruct',
+    }));
+    const request = mock.appendMindEvent.mock.calls.map(([event]) => event).find((event) => event.kind === 'mind.model.request');
+    expect(request.data.contextAllocation).toEqual(allocation);
+  });
+
   it('leaves the default context cap when prepare declares no bound', async () => {
     const run = vi.fn(async () => ({}));
     await supervisor.registerPersistentMindTurnAdapter({ prepare: vi.fn(async () => ({ ok: true, provider: { id: 'example-cloud' }, model: 'example-model' })), run });
