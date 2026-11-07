@@ -451,6 +451,7 @@ export * from './persistentMindThinkingPresets.js';
 export * from './persistentMindChosenName.js';
 export * from './persistentMindUsageLimit.js';
 export * from './persistentMindContextBudget.js';
+export * from './persistentMindContextAllocator.js';
 export * from './persistentMindToolActivation.js';
 export * from './agentScratchPaths.js';
 export * from './agentSentinel.js';

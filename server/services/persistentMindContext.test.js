@@ -112,6 +112,27 @@ describe('chosen identity continuity', () => {
   });
 });
 
+describe('wake-relevant context allocation', () => {
+  // Catches the service dropping the wake's query on the way to the renderer.
+  it('threads the allocation query into the assembled context', async () => {
+    mock.history = [event(1), event(2, 'mind.reply')];
+    const memories = [
+      ...Array.from({ length: 6 }, (_, i) => ({ id: `filler-${i}`, importance: 0.9, content: `Bakery inventory ${i}: ${'flour '.repeat(50)}` })),
+      { id: 'beacon', importance: 0, content: `Lighthouse lamp schedule: ${'beacon '.repeat(40)}` },
+    ];
+    const base = { memories, maxChars: 1_500 };
+
+    const recency = await preparePersistentMindContext(base);
+    const relevance = await preparePersistentMindContext({ ...base, allocationQuery: 'Check the lighthouse lamp' });
+
+    expect(recency.allocation).toMatchObject({ mode: 'recency', queryChars: 0 });
+    expect(recency.text).not.toContain('id=beacon');
+    expect(relevance.allocation).toMatchObject({ mode: 'relevance', queryChars: 'Check the lighthouse lamp'.length });
+    expect(relevance.text).toContain('id=beacon');
+    expect(relevance.allocation.droppedMemoryIds).not.toContain('beacon');
+  });
+});
+
 describe('persistent mind rollups', () => {
   it('records source and model provenance and assembles it within the budget', async () => {
     mock.history = [event(1), event(2, 'mind.wake'), event(3, 'mind.reply')];

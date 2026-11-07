@@ -16,6 +16,7 @@ import { canonicalStringify as maintainerCanonicalStringify } from '../lib/objec
 import { randomUUID } from 'crypto';
 import { getDomainMode } from '../lib/domainAutonomy.js';
 import { isPersistentMindCallDenial } from '../lib/persistentMindTrajectory.js';
+import { buildPersistentMindAllocationQuery } from '../lib/persistentMindContextAllocator.js';
 import {
   PERSISTENT_MIND_LIMITS,
   createDefaultPersistentMindState,
@@ -1056,6 +1057,7 @@ async function runAdmittedTurn({ turn, mindId, route, callBoundary, generation, 
     ...(Number.isInteger(prepared.contextMaxChars) && prepared.contextMaxChars > 0 ? { maxChars: prepared.contextMaxChars } : {}),
     providerId: target.providerId,
     model: target.model,
+    allocationQuery: buildPersistentMindAllocationQuery({ wake: turn.wake, playbookPhase: prepared.playbookPhase }),
     summarize: typeof turnAdapter.summarize === 'function'
       ? (input) => turnAdapter.summarize({ ...input, ...providerCall() })
       : null,
@@ -1075,6 +1077,8 @@ async function runAdmittedTurn({ turn, mindId, route, callBoundary, generation, 
       thinkingPresetId,
       contextChars: context.chars,
       contextSummaryState: context.summaryState,
+      // Counts, ids and sequence ranges only — never the query or item text.
+      contextAllocation: context.allocation ?? null,
     },
   });
   if (!await alive()) return;

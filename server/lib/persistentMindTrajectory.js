@@ -1,5 +1,13 @@
 import { selectPersistentMindContextEvents, renderPersistentMindContextEvent } from './persistentMindContextEvents.js';
-import { fenceBlock, UNTRUSTED_REFERENCE_NOTICE } from './promptFencing.js';
+import { fenceBlock, neutralizeFences, UNTRUSTED_REFERENCE_NOTICE } from './promptFencing.js';
+import {
+  PERSISTENT_MIND_CONTEXT_ALLOCATION,
+  buildPersistentMindAllocationReport,
+  normalizePersistentMindAllocationQuery,
+  persistentMindDroppedEventRanges,
+  scorePersistentMindContextCandidates,
+  selectPersistentMindContextItems,
+} from './persistentMindContextAllocator.js';
 /**
  * Pure persistent-mind trajectory helpers.
  *
@@ -313,10 +321,46 @@ export function buildPersistentMindRollup({
   });
 }
 
+// The recency-first fill: walk newest to oldest, skip what does not fit.
+const newestFirstFill = (lengths, budget) => {
+  const kept = [];
+  let chars = 0;
+  for (let index = lengths.length - 1; index >= 0; index -= 1) {
+    const cost = (kept.length ? 1 : 0) + lengths[index];
+    if (chars + cost > budget) continue;
+    kept.unshift(index);
+    chars += cost;
+  }
+  return { indices: kept, chars };
+};
+
+// Which memory lines survive `bounded()` and then fenceBlock's clamp of the
+// neutralized text, so the allocation report counts what the model reads.
+const memoryLinePresence = (lines, memoryBudget) => {
+  const rawLimit = PERSISTENT_MIND_TRAJECTORY_LIMITS.maxMemoriesChars;
+  let raw = 0;
+  let neutral = 0;
+  return lines.map((line, index) => {
+    const separator = index ? 1 : 0;
+    const rawStart = raw + separator;
+    const neutralStart = neutral + separator;
+    raw = rawStart + line.length;
+    neutral = neutralStart + neutralizeFences(line).length;
+    if (memoryBudget <= 0) return 'dropped';
+    if (raw <= rawLimit && neutral <= memoryBudget) return 'kept';
+    return rawStart < rawLimit && neutralStart < memoryBudget ? 'truncated' : 'dropped';
+  });
+};
+
 /**
  * Render stable identity + older rollups + recent verbatim events into a hard
  * character budget. Unavailable/failed/stale summary state is explicit;
  * a real empty history is `summaryState: "empty"`, never conflated with one.
+ *
+ * `allocationQuery` (the wake's reason, message and playbook phase) lets the
+ * allocator choose WHICH whole memories, recent events and rollups fill the
+ * same budget. Without a usable query the text is exactly the recency-first
+ * rendering. Either way `allocation` reports what was kept and dropped.
  */
 export function assemblePersistentMindContext({
   mindId = PERSISTENT_MIND_ID,
@@ -330,6 +374,7 @@ export function assemblePersistentMindContext({
   recentEventLimit = PERSISTENT_MIND_TRAJECTORY_LIMITS.recentContextEvents,
   promptVersion = PERSISTENT_MIND_ROLLUP_PROMPT_VERSION,
   coverageGap = null,
+  allocationQuery = null,
 } = {}) {
   const cap = Math.max(1_000, Math.min(Number(maxChars) || PERSISTENT_MIND_TRAJECTORY_LIMITS.maxContextChars, 100_000));
   const ordered = orderedMindEvents(events, mindId);
@@ -386,7 +431,7 @@ export function assemblePersistentMindContext({
     PERSISTENT_MIND_TRAJECTORY_LIMITS.maxInstructionsChars
   );
   const seenMemoryContent = new Set();
-  const memoryLines = (Array.isArray(memories) ? memories : [])
+  const memoryEntries = (Array.isArray(memories) ? memories : [])
     .filter((memory) => memory && typeof memory === 'object')
     .sort(comparePersistentMindMemories)
     .map((memory) => {
@@ -398,13 +443,24 @@ export function assemblePersistentMindContext({
       seenMemoryContent.add(key);
       const label = [memory.type, memory.category].filter(Boolean).join('/') || 'memory';
       const protection = persistentMindMemoryProtection(memory);
-      return `- [${label}; id=${memory.id || 'unknown'}${protection === 'standard' ? '' : `; protected=${protection}`}] ${content}`;
+      const line = `- [${label}; id=${memory.id || 'unknown'}${protection === 'standard' ? '' : `; protected=${protection}`}] ${content}`;
+      return { memory, content, protection, line };
     })
     .filter(Boolean);
-  const memoryText = bounded(
-    memoryLines.join('\n'),
-    PERSISTENT_MIND_TRAJECTORY_LIMITS.maxMemoriesChars
-  );
+  const query = normalizePersistentMindAllocationQuery(allocationQuery);
+  const recentLinesAll = recent.map(renderPersistentMindContextEvent);
+  const scores = query ? scorePersistentMindContextCandidates(query, {
+    memories: {
+      texts: memoryEntries.map((entry) => entry.content),
+      recencyKeys: memoryEntries.map((entry) => Date.parse(entry.memory.createdAt)),
+      importance: memoryEntries.map((entry) => entry.memory.importance),
+    },
+    events: { texts: recent.map((event) => event.data.displayText), recencyKeys: recent.map((event) => event.sequence) },
+    rollups: {
+      texts: effectiveReadyRollups.map((rollup) => rollup.summary),
+      recencyKeys: effectiveReadyRollups.map((rollup) => rollup.source.toSequence),
+    },
+  }) : null;
   // Superseded wording never reaches the prompt: the digest carries only what
   // is still true plus the settled history that explains it. The caller renders
   // it — this module is reached by ~300 suites for its id/kind constants alone,
@@ -420,6 +476,21 @@ export function assemblePersistentMindContext({
     PERSISTENT_MIND_TRAJECTORY_LIMITS.maxMemoriesChars,
     cap - identityText.length - instructionsText.length - mindId.length - 500,
   ));
+  // Protection is a retention guarantee, not a relevance contest: protected
+  // memories are forced in, the rest compete by score for whole-line room.
+  // Chosen lines keep the comparator order so relevance never reorders the prefix.
+  const renderedMemoryEntries = scores
+    ? selectPersistentMindContextItems({
+      lengths: memoryEntries.map((entry) => entry.line.length),
+      scores: scores.memories,
+      budget: memoryBudget,
+      forced: memoryEntries.flatMap((entry, index) => (entry.protection === 'standard' ? [] : [index])),
+    }).indices.map((index) => memoryEntries[index])
+    : memoryEntries;
+  const memoryText = bounded(
+    renderedMemoryEntries.map((entry) => entry.line).join('\n'),
+    PERSISTENT_MIND_TRAJECTORY_LIMITS.maxMemoriesChars
+  );
   const memoryBlock = memoryBudget > 0
     ? fenceBlock('Curated memory reference data', memoryText || '(none)', memoryBudget)
     : '(omitted due to context budget)';
@@ -441,28 +512,49 @@ export function assemblePersistentMindContext({
 
   // Keep recent raw events available even if many large rollups exist. Older
   // summaries receive at most 45% of the post-header budget; newest summaries
-  // win inside that bound, while recent events consume the remainder.
+  // (or, with a query, the best-scoring ones after the newest-event floor's
+  // room) win inside that bound, while recent events consume the remainder.
   const sectionOverhead = `\n\n# Older context\n${statusLine}\n\n# Recent trajectory\n`;
   const contentBudget = Math.max(0, cap - prefix.length - sectionOverhead.length);
-  const summaryBudget = summaryLines.length ? Math.floor(contentBudget * 0.45) : 0;
-  const keptSummaryLines = [];
-  let summaryChars = 0;
-  for (const line of [...summaryLines].reverse()) {
-    const separator = keptSummaryLines.length ? 1 : 0;
-    if (summaryChars + separator + line.length > summaryBudget) continue;
-    keptSummaryLines.unshift(line);
-    summaryChars += separator + line.length;
-  }
-  const recentBudget = contentBudget - summaryChars;
-  const recentLines = [];
-  let recentChars = 0;
-  for (const event of [...recent].reverse()) {
-    const line = renderPersistentMindContextEvent(event);
-    const separator = recentLines.length ? 1 : 0;
-    if (recentChars + separator + line.length > recentBudget) continue;
-    recentLines.unshift(line);
-    recentChars += separator + line.length;
-  }
+  const recentLengths = recentLinesAll.map((line) => line.length);
+  const recentFloor = Math.min(PERSISTENT_MIND_CONTEXT_ALLOCATION.recentEventFloor, recent.length);
+  // Newest first, so the immediate thread claims room before rollups or relevance.
+  const floorIndices = recent.map((_, index) => index).slice(recent.length - recentFloor).reverse();
+  const floorChars = scores
+    ? selectPersistentMindContextItems({ lengths: recentLengths, scores: scores.events, budget: contentBudget, mandatory: floorIndices, fillRest: false }).chars
+    : 0;
+  const summaryBudget = summaryLines.length
+    ? Math.min(Math.floor(contentBudget * PERSISTENT_MIND_CONTEXT_ALLOCATION.olderSummaryShare), contentBudget - floorChars)
+    : 0;
+  const summaryLengths = summaryLines.map((line) => line.length);
+  const keptSummary = scores
+    ? selectPersistentMindContextItems({ lengths: summaryLengths, scores: scores.rollups, budget: summaryBudget })
+    : newestFirstFill(summaryLengths, summaryBudget);
+  const keptSummaryLines = keptSummary.indices.map((index) => summaryLines[index]);
+  const recentBudget = contentBudget - keptSummary.chars;
+  const keptRecent = scores
+    ? selectPersistentMindContextItems({ lengths: recentLengths, scores: scores.events, budget: recentBudget, mandatory: floorIndices })
+    : newestFirstFill(recentLengths, recentBudget);
+  const recentLines = keptRecent.indices.map((index) => recentLinesAll[index]);
+  const memoryPresence = memoryLinePresence(renderedMemoryEntries.map((entry) => entry.line), memoryBudget);
+  const presentMemories = new Set(renderedMemoryEntries
+    .filter((_, index) => memoryPresence[index] !== 'dropped')
+    .map((entry) => entry.memory));
+  const allocation = buildPersistentMindAllocationReport({
+    mode: scores ? 'relevance' : 'recency',
+    queryChars: query.length,
+    protectedMemoryCount: memoryEntries.filter((entry) => entry.protection !== 'standard').length,
+    memories: {
+      candidates: memoryEntries.length,
+      kept: memoryPresence.filter((state) => state === 'kept').length,
+      truncated: memoryPresence.filter((state) => state === 'truncated').length,
+      droppedIds: memoryEntries.filter((entry) => !presentMemories.has(entry.memory)).map((entry) => entry.memory.id || 'unknown'),
+    },
+    summaries: { candidates: summaryLines.length, kept: keptSummaryLines.length },
+    events: { candidates: recent.length, kept: recentLines.length },
+    droppedEventRanges: persistentMindDroppedEventRanges(recent, keptRecent.indices),
+    recentEventFloor: scores ? recentFloor : 0,
+  });
   const sections = [
     prefix,
     `# Older context\n${statusLine}${keptSummaryLines.length ? `\n${keptSummaryLines.join('\n')}` : ''}`,
@@ -483,10 +575,11 @@ export function assemblePersistentMindContext({
       toEventId: older.at(-1)?.eventId ?? selectedRollups.at(-1)?.source.toEventId ?? null,
     } : null,
     recentEventCount: recentLines.length,
-    memoryCount: memoryLines.length,
+    memoryCount: memoryEntries.length,
     journalActiveCount: journalSummary.activeCount,
     identityChars: identityText.length,
     instructionsChars: instructionsText.length,
+    allocation,
   };
 }
 

@@ -336,6 +336,29 @@ describe('persistent mind routes', () => {
     }));
   });
 
+  // Catches the preview not allocating for the next wake, or the allocation
+  // report carrying the wake's private text into the API response.
+  it('previews the next wake allocation with counts only, never its text', async () => {
+    const { assemblePersistentMindContext } = await import('../lib/persistentMindTrajectory.js');
+    mocks.readPersistentMindMemories.mockResolvedValue([
+      { id: 'memory-leak', content: 'Pipe leak repair notes', sourceAgentId: 'cos-persistent-mind' },
+      { id: 'memory-other', content: 'Bakery inventory notes', sourceAgentId: 'cos-persistent-mind' },
+    ]);
+    mocks.preparePersistentMindContext.mockImplementation(async (input) => assemblePersistentMindContext(input));
+    const res = await get('/mind/context');
+    expect(res.status).toBe(200);
+    expect(mocks.preparePersistentMindContext).toHaveBeenCalledWith(expect.objectContaining({ allocationQuery: 'must not leak' }));
+    expect(res.body.preview).toMatchObject({
+      summaryState: 'empty',
+      allocation: {
+        mode: 'relevance',
+        queryChars: 'must not leak'.length,
+        sections: { memories: { candidates: 2, kept: 2, dropped: 0 } },
+      },
+    });
+    expect(JSON.stringify(res.body.preview.allocation)).not.toMatch(/leak|must|Bakery|Pipe/);
+  });
+
   it('serves a server-described inventory of persistent-mind tools', async () => {
     const res = await get('/mind/tools');
     expect(res.status).toBe(200);

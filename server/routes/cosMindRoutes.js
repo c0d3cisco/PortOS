@@ -39,6 +39,7 @@ import { composePersistentMindInstructions, normalizePersistentMindPlaybook, PER
 import { resolvePersistentMindPlaybookPhase } from '../services/persistentMindPlaybookSignals.js';
 import { publicPersistentMindState } from '../lib/persistentMindPublic.js';
 import { publicPersistentMindTurnExecutions } from '../lib/persistentMindTrajectory.js';
+import { buildPersistentMindAllocationQuery } from '../lib/persistentMindContextAllocator.js';
 import { mindBundleApplySchema, mindBundleExportSchema, mindBundlePreviewSchema, validateRequest } from '../lib/validation.js';
 import { readPersistentMindEvents, readPersistentMindHistory } from '../services/agentRunEventLog.js';
 import { loadState } from '../services/cosState.js';
@@ -276,7 +277,7 @@ router.get('/mind/maintainer', asyncHandler(async (_req, res) => {
 }));
 
 router.get('/mind/context', asyncHandler(async (_req, res) => {
-  const root = await loadState();
+  const [root, state] = await Promise.all([loadState(), getPersistentMindState()]);
   const prompt = normalizePersistentMindPrompt(root.config?.persistentMindPrompt);
   const playbook = normalizePersistentMindPlaybook(root.config?.persistentMindPlaybook);
   const profile = normalizePersistentMindProfile(root.config?.persistentMindProfile);
@@ -289,11 +290,16 @@ router.get('/mind/context', asyncHandler(async (_req, res) => {
     // wake would currently pick (#7458).
     playbook.mode === 'continuous-play' ? resolvePersistentMindPlaybookPhase() : null,
   ]);
+  // Preview the wake that would run next, in the supervisor's order: the
+  // active turn, then a queued message (messages outrank a self-wake).
+  const nextWake = state?.activeTurn?.wake
+    ?? (state?.queuedMessages?.[0] ? { kind: 'message', message: state.queuedMessages[0] } : state?.selfWake ?? null);
   const preview = await preparePersistentMindContext({
     mindId: PERSISTENT_MIND_ID,
     identity: prompt.identity,
     instructions: composeMaintainerInstructions(composePersistentMindInstructions(prompt.instructions, playbook, playbookPhase?.phase), root.config?.persistentMindMaintainer),
     memories,
+    allocationQuery: buildPersistentMindAllocationQuery({ wake: nextWake, playbookPhase }),
   });
   res.json({
     prompt,
