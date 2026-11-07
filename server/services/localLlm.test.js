@@ -1558,6 +1558,56 @@ describe('localLlm', () => {
   });
 });
 
+describe('syncOllamaProviderModels', () => {
+  const emit = vi.fn();
+  const local = { id: 'ollama', type: 'api', endpoint: 'http://localhost:11434/v1', models: ['qwen3.5:9b'] };
+  beforeEach(() => {
+    svc.bindLocalLlmIo({ emit });
+  });
+
+  it('leaves a catalog that already matches the daemon untouched on first look', async () => {
+    mocks.ollama.getInstalledModels.mockResolvedValue([{ id: 'qwen3.5:9b' }]);
+    await expect(svc.syncOllamaProviderModels({ providers: [local] })).resolves.toBe(false);
+    expect(mocks.ollama.getInstalledModels).toHaveBeenCalledWith(true);
+    expect(mocks.providers.refreshProviderModelsBatch).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalled();
+  });
+
+  it('picks up models installed outside PortOS on the next list read', async () => {
+    mocks.ollama.getInstalledModels.mockResolvedValue([{ id: 'qwen3.5:9b' }, { id: 'qwen2.5-coder:7b-instruct' }]);
+    await expect(svc.syncOllamaProviderModels({ providers: [local] })).resolves.toBe(true);
+    expect(mocks.providers.refreshProviderModelsBatch).toHaveBeenCalledWith(['ollama']);
+    expect(emit).toHaveBeenCalledWith('providers:changed');
+
+    // Same set again: no second refresh.
+    await svc.syncOllamaProviderModels({ providers: [local] });
+    expect(mocks.providers.refreshProviderModelsBatch).toHaveBeenCalledTimes(1);
+
+    // `ollama rm` from a terminal: the next read sees it.
+    mocks.ollama.getInstalledModels.mockResolvedValue([{ id: 'qwen3.5:9b' }]);
+    await svc.syncOllamaProviderModels({ providers: [local] });
+    expect(mocks.providers.refreshProviderModelsBatch).toHaveBeenCalledTimes(2);
+  });
+
+  it('scopes to the local daemon: remote Ollama endpoints are neither probed nor refreshed', async () => {
+    const remote = { id: 'remote-ollama', type: 'api', endpoint: 'http://192.0.2.10:11434/v1', models: ['other:1b'] };
+    mocks.ollama.getInstalledModels.mockResolvedValue([{ id: 'qwen3.5:9b' }, { id: 'new:1b' }]);
+    await svc.syncOllamaProviderModels({ providers: [local, remote] });
+    expect(mocks.providers.refreshProviderModelsBatch).toHaveBeenCalledWith(['ollama']);
+
+    mocks.ollama.getInstalledModels.mockClear();
+    await svc.syncOllamaProviderModels({ providers: [remote] });
+    expect(mocks.ollama.getInstalledModels).not.toHaveBeenCalled();
+  });
+
+  it('leaves catalogs alone when the daemon list is unreadable', async () => {
+    mocks.ollama.getInstalledModels.mockResolvedValueOnce([]);
+    mocks.ollama.getLastInstalledModelsError.mockReturnValueOnce('Ollama is unavailable');
+    await expect(svc.syncOllamaProviderModels({ providers: [local] })).resolves.toBe(false);
+    expect(mocks.providers.refreshProviderModelsBatch).not.toHaveBeenCalled();
+  });
+});
+
 // Both managers cache an EMPTY array on a failed read rather than throwing, so
 // `[]` alone cannot say whether the backend has no models or could not be asked.
 // Callers that fall back to a stored list (the persistent-mind task catalog) and
