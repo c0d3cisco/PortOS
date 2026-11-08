@@ -77,6 +77,12 @@ vi.mock('./observedContextWindows.js', () => ({
   withObservedContextWindows: vi.fn(async (provider) => provider),
 }));
 
+// The per-model capability probe hits the Ollama daemon; its own suite covers
+// the decision. Here it stands in for "this model cannot think".
+vi.mock('./ollamaAgentContext.js', () => ({
+  dropUnsupportedOllamaThinking: vi.fn(async (provider) => ({ provider: { ...provider, thinking: false }, effort: null, dropped: true })),
+}));
+
 const runner = await import('./runner.js');
 const tuiRunner = await import('./tuiPromptRunner.js');
 const executionReadiness = await import('./providerExecutionReadiness.js');
@@ -204,6 +210,20 @@ describe('promptRunner — happy paths', () => {
     expect(out).toEqual({ text: 'foobar', runId: 'run-xyz', model: 'gpt-test', provider: apiProvider() });
     expect(runner.executeApiRun).toHaveBeenCalledTimes(1);
     expect(runner.executeCliRun).not.toHaveBeenCalled();
+  });
+
+  it('drops thinking from an Ollama API run whose model cannot think, leaving other API runs untouched', async () => {
+    const thinkingGuard = (await import('./ollamaAgentContext.js')).dropUnsupportedOllamaThinking;
+    runner.executeApiRun.mockImplementation(async ({ onComplete }) => onComplete({ success: true }));
+
+    await runPromptThroughProvider({ provider: { id: 'ollama', type: 'api', defaultModel: 'plain-chat', thinking: true },
+      prompt: 'p', source: 'test', allowFallback: false });
+    expect(thinkingGuard).toHaveBeenCalledWith(expect.objectContaining({ id: 'ollama' }), 'plain-chat');
+    expect(runner.executeApiRun.mock.calls[0][0].provider).toMatchObject({ id: 'ollama', thinking: false });
+
+    await runPromptThroughProvider({ provider: apiProvider({ thinking: true }), prompt: 'p', source: 'test', allowFallback: false });
+    expect(thinkingGuard).toHaveBeenCalledTimes(1);
+    expect(runner.executeApiRun.mock.calls[1][0].provider).toMatchObject({ id: 'mock-api', thinking: true });
   });
 
   it('passes explicit API output and absolute spending caps without changing the route', async () => {
